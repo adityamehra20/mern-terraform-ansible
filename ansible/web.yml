@@ -1,0 +1,26 @@
+---
+- name: Configure web server
+  hosts: web
+  become: true
+  gather_facts: false
+
+  pre_tasks:
+    - name: Check vault secrets
+      ansible.builtin.assert:
+        that:
+          - vault_mongodb_app_password is defined
+          - "'CHANGE_ME' not in vault_mongodb_app_password"
+        fail_msg: "vault.yml missing or has placeholder passwords"
+        quiet: true
+
+    - name: Check inventory
+      ansible.builtin.assert:
+        that:
+          - db_private_ip is defined
+          - web_public_ip is defined
+        fail_msg: "run terraform apply first"
+        quiet: true
+
+  roles:
+    - role: common
+    - role: web

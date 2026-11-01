@@ -1,0 +1,37 @@
+---
+app_repo_url: "https://github.com/adityamehra20/TravelMemory.git"
+app_repo_version: "main"
+app_dir: /opt/travelmemory
+app_home: /var/lib/travelmemory
+app_user: travelmemory
+app_group: travelmemory
+
+backend_port: 3001
+backend_service_name: travelmemory-backend
+backend_cors_origins: "http://{{ web_public_ip }}"
+backend_upload_dir: uploads
+backend_max_upload_mb: 5
+backend_trust_proxy: 1
+
+# nginx proxies /api to the backend
+frontend_backend_url: "/api"
+frontend_build_dir: "{{ app_dir }}/frontend/build"
+frontend_force_build: false
+
+node_major_version: "20"
+
+mongodb_version: "7.0"
+mongodb_port: 27017
+mongodb_db_name: travelmemory
+mongodb_admin_user: admin
+mongodb_app_user: travelmemory_app
+mongodb_admin_password: "{{ vault_mongodb_admin_password }}"
+mongodb_app_password: "{{ vault_mongodb_app_password }}"
+
+mongodb_uri: "mongodb://{{ mongodb_app_user }}:{{ mongodb_app_password | urlencode }}@{{ db_private_ip }}:{{ mongodb_port }}/{{ mongodb_db_name }}?authSource={{ mongodb_db_name }}"
+
+ufw_ssh_from: any
+sshd_max_auth_tries: 3
+fail2ban_bantime: 1h
+fail2ban_maxretry: 5
+swap_size_mb: 2048

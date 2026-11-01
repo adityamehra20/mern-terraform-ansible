@@ -1,0 +1,22 @@
+---
+- name: Configure MongoDB server
+  hosts: db
+  become: true
+  gather_facts: false
+
+  pre_tasks:
+    - name: Check vault secrets
+      ansible.builtin.assert:
+        that:
+          - vault_mongodb_admin_password is defined
+          - vault_mongodb_app_password is defined
+          - vault_mongodb_admin_password | length >= 12
+          - vault_mongodb_app_password | length >= 12
+          - "'CHANGE_ME' not in vault_mongodb_admin_password"
+          - "'CHANGE_ME' not in vault_mongodb_app_password"
+        fail_msg: "vault.yml missing or passwords too short (min 12 chars)"
+        quiet: true
+
+  roles:
+    - role: common
+    - role: mongodb

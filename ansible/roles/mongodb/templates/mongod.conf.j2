@@ -1,0 +1,23 @@
+# {{ ansible_managed }}
+
+storage:
+  dbPath: /var/lib/mongodb
+
+systemLog:
+  destination: file
+  logAppend: true
+  path: /var/log/mongodb/mongod.log
+
+net:
+  port: {{ mongodb_port }}
+  bindIp: 127.0.0.1,{{ ansible_default_ipv4.address }}
+
+processManagement:
+  timeZoneInfo: /usr/share/zoneinfo
+
+security:
+{% if mongodb_auth_enabled | default(true) %}
+  authorization: enabled
+{% else %}
+  authorization: disabled
+{% endif %}

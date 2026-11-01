@@ -1,0 +1,187 @@
+---
+- name: Add MongoDB signing key
+  ansible.builtin.get_url:
+    url: "https://pgp.mongodb.com/server-{{ mongodb_version }}.asc"
+    dest: "/usr/share/keyrings/mongodb-server-{{ mongodb_version }}.asc"
+    mode: "0644"
+
+- name: Add MongoDB apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-{{ mongodb_version }}.asc ]
+      https://repo.mongodb.org/apt/ubuntu {{ ansible_distribution_release }}/mongodb-org/{{ mongodb_version }} multiverse
+    filename: "mongodb-org-{{ mongodb_version }}"
+    state: present
+
+- name: Install MongoDB server and mongosh
+  ansible.builtin.apt:
+    name:
+      - mongodb-org
+    state: present
+    update_cache: true
+  register: apt_mongo
+  retries: 5
+  delay: 15
+  until: apt_mongo is succeeded
+
+- name: Hold MongoDB package version
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - mongodb-org
+    - mongodb-org-server
+
+- name: Check if authorization is enabled
+  ansible.builtin.command: grep -Eq '^\s*authorization:\s*enabled' /etc/mongod.conf
+  register: auth_check
+  changed_when: false
+  failed_when: false
+
+- name: Set fact mongodb_auth_already_enabled
+  ansible.builtin.set_fact:
+    mongodb_auth_already_enabled: "{{ auth_check.rc == 0 }}"
+
+# first run: start without auth so the admin user can be created
+- name: Bootstrap mongod without auth
+  when: not mongodb_auth_already_enabled
+  block:
+    - name: Write mongod.conf without auth
+      ansible.builtin.template:
+        src: mongod.conf.j2
+        dest: /etc/mongod.conf
+        owner: root
+        group: root
+        mode: "0644"
+      vars:
+        mongodb_auth_enabled: false
+
+    - name: Start mongod without auth
+      ansible.builtin.systemd:
+        name: mongod
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    - name: Wait for mongod to listen
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ mongodb_port }}"
+        timeout: 60
+
+    - name: Create the admin user
+      ansible.builtin.command:
+        argv:
+          - mongosh
+          - "mongodb://127.0.0.1:{{ mongodb_port }}/admin"
+          - --quiet
+          - --eval
+          - |
+            const u = process.env.M_USER, p = process.env.M_PASS;
+            if (db.getUser(u)) { print('EXISTS'); }
+            else {
+              db.createUser({ user: u, pwd: p, roles: [
+                { role: 'userAdminAnyDatabase', db: 'admin' },
+                { role: 'readWriteAnyDatabase', db: 'admin' },
+                { role: 'clusterMonitor', db: 'admin' } ] });
+              print('CREATED');
+            }
+      environment:
+        M_USER: "{{ mongodb_admin_user }}"
+        M_PASS: "{{ mongodb_admin_password }}"
+      register: admin_user
+      changed_when: "'CREATED' in admin_user.stdout"
+      no_log: true
+
+- name: Ensure mongod is running
+  ansible.builtin.systemd:
+    name: mongod
+    state: started
+    enabled: true
+
+- name: Wait for mongod to listen
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ mongodb_port }}"
+    timeout: 60
+
+- name: Create the app user
+  ansible.builtin.command:
+    argv:
+      - mongosh
+      - "mongodb://127.0.0.1:{{ mongodb_port }}/{{ mongodb_db_name }}"
+      - --quiet
+      - --authenticationDatabase
+      - admin
+      - -u
+      - "{{ mongodb_admin_user }}"
+      - -p
+      - "{{ mongodb_admin_password }}"
+      - --eval
+      - |
+        const u = process.env.M_USER, p = process.env.M_PASS, d = process.env.M_DB;
+        if (db.getUser(u)) { print('EXISTS'); }
+        else {
+          db.createUser({ user: u, pwd: p, roles: [ { role: 'readWrite', db: d } ] });
+          print('CREATED');
+        }
+  environment:
+    M_USER: "{{ mongodb_app_user }}"
+    M_PASS: "{{ mongodb_app_password }}"
+    M_DB: "{{ mongodb_db_name }}"
+  register: app_user
+  changed_when: "'CREATED' in app_user.stdout"
+  no_log: true
+
+- name: Write mongod.conf with auth
+  ansible.builtin.template:
+    src: mongod.conf.j2
+    dest: /etc/mongod.conf
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    mongodb_auth_enabled: true
+  notify: Restart mongod
+
+- name: Flush handlers
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for mongod after restart
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ mongodb_port }}"
+    timeout: 60
+
+- name: Check unauthenticated access fails
+  ansible.builtin.command:
+    argv:
+      - mongosh
+      - "mongodb://127.0.0.1:{{ mongodb_port }}/{{ mongodb_db_name }}"
+      - --quiet
+      - --eval
+      - "db.getCollectionNames()"
+  register: unauth_test
+  changed_when: false
+  failed_when: unauth_test.rc == 0
+
+- name: Check app user can log in
+  ansible.builtin.command:
+    argv:
+      - mongosh
+      - "{{ mongodb_uri | replace(db_private_ip, '127.0.0.1') }}"
+      - --quiet
+      - --eval
+      - "db.runCommand({ ping: 1 }).ok"
+  register: auth_test
+  changed_when: false
+  failed_when: auth_test.stdout | trim != "1"
+  no_log: true
+
+- name: UFW - allow MongoDB from web server
+  community.general.ufw:
+    rule: allow
+    port: "{{ mongodb_port }}"
+    proto: tcp
+    src: "{{ web_private_ip }}"
+    comment: MongoDB from web server

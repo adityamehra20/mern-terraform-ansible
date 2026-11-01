@@ -1,0 +1,2 @@
+---
+ufw_ssh_from: "{{ public_subnet_cidr }}"

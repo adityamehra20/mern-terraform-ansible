@@ -1,0 +1,81 @@
+---
+- name: Verify MongoDB on the DB server
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: mongod service is active and enabled
+      ansible.builtin.systemd:
+        name: mongod
+      register: mongod_state
+      failed_when: mongod_state.status.ActiveState != "active" or mongod_state.status.UnitFileState != "enabled"
+
+    - name: Unauthenticated access is rejected
+      ansible.builtin.command:
+        argv: [mongosh, "mongodb://127.0.0.1:{{ mongodb_port }}/{{ mongodb_db_name }}", --quiet, --eval, "db.getCollectionNames()"]
+      register: unauth
+      changed_when: false
+      failed_when: unauth.rc == 0
+
+    - name: Count trips stored by the application
+      ansible.builtin.command:
+        argv:
+          - mongosh
+          - "{{ mongodb_uri | replace(db_private_ip, '127.0.0.1') }}"
+          - --quiet
+          - --eval
+          - "db.tripdetails.countDocuments()"
+      register: trip_count
+      changed_when: false
+      no_log: true
+
+    - name: MongoDB summary
+      ansible.builtin.debug:
+        msg: "trips in {{ mongodb_db_name }}: {{ trip_count.stdout | trim }}"
+
+- name: Verify the web server and application
+  hosts: web
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Backend and nginx services are active and enabled
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+      register: svc
+      failed_when: svc.status.ActiveState != "active" or svc.status.UnitFileState != "enabled"
+      loop:
+        - "{{ backend_service_name }}"
+        - nginx
+
+    - name: Backend reports database connected
+      ansible.builtin.uri:
+        url: "http://127.0.0.1/api/health"
+        return_content: true
+      register: health
+      failed_when: health.json.db != "connected"
+
+    - name: API lists trips through nginx
+      ansible.builtin.uri:
+        url: "http://127.0.0.1/api/trip"
+        return_content: true
+      register: trips
+
+    - name: Frontend is served
+      ansible.builtin.uri:
+        url: "http://127.0.0.1/"
+        return_content: true
+      register: frontend
+      failed_when: "'<div id=\"root\">' not in frontend.content"
+
+    - name: Backend port is not open in UFW
+      ansible.builtin.command: "ufw status"
+      register: ufw
+      changed_when: false
+      failed_when: (backend_port | string) in ufw.stdout
+
+    - name: Web summary
+      ansible.builtin.debug:
+        msg:
+          - "health: {{ health.json }}"
+          - "trips: {{ trips.json | length }}"
+          - "url: http://{{ web_public_ip }}"

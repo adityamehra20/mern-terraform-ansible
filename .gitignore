@@ -1,0 +1,47 @@
+# terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+!.terraform.lock.hcl
+
+# ansible
+ansible/inventory/hosts.yml
+ansible/group_vars/all/vault.yml
+!ansible/group_vars/all/vault.yml.example
+ansible/.vault_pass*
+.vault_pass*
+*.retry
+ansible/collections/
+
+# keys / secrets
+*.pem
+*.key
+*.pub
+!**/*.pub.example
+id_rsa*
+id_ed25519*
+travelmemory-key*
+.aws/
+credentials
+.env
+.env.*
+!.env.example
+
+*.log
+*.swp
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+node_modules/
+submission/*.pdf
+submission/*.docx

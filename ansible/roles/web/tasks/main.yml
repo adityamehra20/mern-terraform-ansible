@@ -1,0 +1,284 @@
+---
+- name: Check for an existing swap file
+  ansible.builtin.stat:
+    path: /swapfile
+  register: swapfile
+
+- name: Create swap file
+  when: not swapfile.stat.exists
+  block:
+    - name: Allocate swap file
+      ansible.builtin.command: "fallocate -l {{ swap_size_mb }}M /swapfile"
+      args:
+        creates: /swapfile
+
+    - name: Secure and format swap file
+      ansible.builtin.shell: chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+      changed_when: true
+
+- name: Persist swap in fstab
+  ansible.posix.mount:
+    src: /swapfile
+    path: none
+    fstype: swap
+    opts: sw
+    state: present
+
+- name: Add NodeSource signing key
+  ansible.builtin.get_url:
+    url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+    dest: /usr/share/keyrings/nodesource-repo.asc
+    mode: "0644"
+
+- name: Add NodeSource apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/usr/share/keyrings/nodesource-repo.asc] https://deb.nodesource.com/node_{{ node_major_version }}.x nodistro main"
+    filename: nodesource
+    state: present
+
+- name: Install Node.js, nginx and build tools
+  ansible.builtin.apt:
+    name:
+      - nodejs
+      - nginx
+      - build-essential
+    state: present
+    update_cache: true
+  register: apt_web
+  retries: 5
+  delay: 15
+  until: apt_web is succeeded
+
+- name: Record Node.js and npm versions
+  ansible.builtin.command: bash -c 'echo "node $(node -v) / npm $(npm -v)"'
+  register: node_version
+  changed_when: false
+
+- name: Show Node.js version
+  ansible.builtin.debug:
+    msg: "{{ node_version.stdout }}"
+
+- name: Create application system user
+  ansible.builtin.user:
+    name: "{{ app_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ app_home }}"
+    create_home: true
+
+- name: Create application directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0755"
+
+- name: Remove .ansible temp dir from app directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}/.ansible"
+    state: absent
+
+- name: Clone TravelMemory repo
+  ansible.builtin.git:
+    repo: "{{ app_repo_url }}"
+    dest: "{{ app_dir }}"
+    version: "{{ app_repo_version }}"
+    force: true
+  become_user: "{{ app_user }}"
+  environment:
+    HOME: "{{ app_home }}"
+  register: app_repo
+  notify: Restart backend
+
+- name: Check for existing backend node_modules
+  ansible.builtin.stat:
+    path: "{{ app_dir }}/backend/node_modules"
+  register: backend_modules
+
+- name: Install backend dependencies
+  ansible.builtin.command: npm ci --omit=dev --no-audit --no-fund
+  args:
+    chdir: "{{ app_dir }}/backend"
+  become_user: "{{ app_user }}"
+  environment:
+    HOME: "{{ app_home }}"
+  when: app_repo.changed or not backend_modules.stat.exists
+  changed_when: true
+  notify: Restart backend
+
+- name: Write backend .env
+  ansible.builtin.template:
+    src: backend.env.j2
+    dest: "{{ app_dir }}/backend/.env"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0600"
+  notify: Restart backend
+
+- name: Create uploads directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}/backend/{{ backend_upload_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0750"
+
+- name: Install backend systemd unit
+  ansible.builtin.template:
+    src: travelmemory-backend.service.j2
+    dest: "/etc/systemd/system/{{ backend_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart backend
+
+- name: Write frontend .env
+  ansible.builtin.template:
+    src: frontend.env.j2
+    dest: "{{ app_dir }}/frontend/.env"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0644"
+  register: frontend_env
+
+- name: Check for an existing frontend build
+  ansible.builtin.stat:
+    path: "{{ frontend_build_dir }}/index.html"
+  register: frontend_build
+
+- name: Check for existing frontend node_modules
+  ansible.builtin.stat:
+    path: "{{ app_dir }}/frontend/node_modules"
+  register: frontend_modules
+
+- name: Install frontend dependencies
+  ansible.builtin.command: npm ci --no-audit --no-fund
+  args:
+    chdir: "{{ app_dir }}/frontend"
+  become_user: "{{ app_user }}"
+  environment:
+    HOME: "{{ app_home }}"
+  when: app_repo.changed or not frontend_modules.stat.exists
+  changed_when: true
+  async: 900
+  poll: 15
+
+- name: Build React frontend
+  ansible.builtin.command: npm run build
+  args:
+    chdir: "{{ app_dir }}/frontend"
+  become_user: "{{ app_user }}"
+  environment:
+    HOME: "{{ app_home }}"
+    CI: "false"
+    NODE_OPTIONS: "--max-old-space-size=1536"
+    GENERATE_SOURCEMAP: "false"
+  when: app_repo.changed or frontend_env.changed or not frontend_build.stat.exists or frontend_force_build | bool
+  changed_when: true
+  async: 1200
+  poll: 15
+
+- name: Fix ownership of app directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    recurse: true
+
+- name: Make build directory readable by nginx
+  ansible.builtin.file:
+    path: "{{ item }}"
+    mode: "0755"
+  loop:
+    - "{{ app_dir }}"
+    - "{{ app_dir }}/frontend"
+    - "{{ frontend_build_dir }}"
+
+- name: Enable and start the backend service
+  ansible.builtin.systemd:
+    name: "{{ backend_service_name }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Deploy nginx site
+  ansible.builtin.template:
+    src: travelmemory.nginx.j2
+    dest: /etc/nginx/sites-available/travelmemory
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Enable nginx site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/travelmemory
+    dest: /etc/nginx/sites-enabled/travelmemory
+    state: link
+  notify: Reload nginx
+
+- name: Remove the default nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Reload nginx
+
+- name: Hide nginx version
+  ansible.builtin.lineinfile:
+    path: /etc/nginx/nginx.conf
+    regexp: '^\s*#?\s*server_tokens'
+    line: "\tserver_tokens off;"
+    insertafter: 'http {'
+  notify: Reload nginx
+
+- name: Enable and start nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: started
+    enabled: true
+
+- name: Flush handlers
+  ansible.builtin.meta: flush_handlers
+
+- name: UFW - allow HTTP and HTTPS
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+    comment: "nginx {{ item }}"
+  loop:
+    - "80"
+    - "443"
+
+- name: Wait for backend health check
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ backend_port }}/health"
+    status_code: 200
+  register: backend_health
+  until: backend_health.status == 200
+  retries: 12
+  delay: 5
+
+- name: Check /api/health through nginx
+  ansible.builtin.uri:
+    url: "http://127.0.0.1/api/health"
+    status_code: 200
+    return_content: true
+  register: nginx_health
+
+- name: Check frontend is served
+  ansible.builtin.uri:
+    url: "http://127.0.0.1/"
+    status_code: 200
+    return_content: true
+  register: nginx_frontend
+  failed_when: "'<div id=\"root\">' not in nginx_frontend.content"
+
+- name: Show result
+  ansible.builtin.debug:
+    msg:
+      - "Health: {{ nginx_health.json }}"
+      - "URL: http://{{ web_public_ip }}"

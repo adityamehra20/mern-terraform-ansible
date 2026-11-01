@@ -1,0 +1,5 @@
+Assignment: Deploying a MERN Application through Terraform and Ansible
+Name: Aditya Mehra
+
+Repo: https://github.com/adityamehra20/mern-terraform-ansible
+App repo (fork): https://github.com/adityamehra20/TravelMemory

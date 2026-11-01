@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitEmptyPasswords no
+PubkeyAuthentication yes
+MaxAuthTries {{ sshd_max_auth_tries }}
+MaxSessions 10
+LoginGraceTime 30
+X11Forwarding no
+AllowAgentForwarding no
+# needed for jump host to db
+AllowTcpForwarding yes
+ClientAliveInterval 300
+ClientAliveCountMax 2
+LogLevel VERBOSE

@@ -1,0 +1,6 @@
+---
+- name: DB server
+  import_playbook: db.yml
+
+- name: Web server
+  import_playbook: web.yml
